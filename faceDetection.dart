@@ -1,0 +1,300 @@
+import 'package:camera/camera.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+
+class FaceDetection extends StatefulWidget {
+  FaceDetection();
+  @override
+  State<StatefulWidget> createState() => FaceState();
+}
+
+class FaceState extends State<FaceDetection> {
+  final FaceDetector faceDetector = FaceDetector(
+    options: FaceDetectorOptions(
+      enableContours: true,
+      enableClassification: true,
+      minFaceSize: 0.3,
+      performanceMode: FaceDetectorMode.fast,
+    ),
+  );
+
+  late CameraController cameraController;
+  bool isCameraInittialized = false;
+  bool isDetecting = false;
+  bool isFrontCamera = true;
+  List<String> challengeAction = ['smile', 'blink', 'lookRight', 'lookLeft'];
+  int currentActionIndex = 0;
+  bool waitingForNeutral = false;
+
+  double? smileProbability;
+  double? leftEyeOpenProbability;
+  double? rightEyeOpenProbability;
+  double? headEulerAngleY;
+
+  @override
+  void initState() {
+    super.initState();
+    initializeCamera();
+    challengeAction.shuffle();
+  }
+
+  Future<void> initializeCamera() async {
+    final cameras = await availableCameras();
+    final frontCamera = cameras.firstWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.front,
+    );
+    cameraController = CameraController(
+      frontCamera,
+      ResolutionPreset.high,
+      enableAudio: false,
+    );
+    await cameraController.initialize();
+    if (mounted) {
+      setState(() {
+        isCameraInittialized = true;
+        waitingForNeutral = true;
+      });
+      startFaceDetecting();
+    }
+  }
+
+  void startFaceDetecting() {
+    if (isCameraInittialized) {
+      cameraController.startImageStream((CameraImage image) {
+        if (!isDetecting) {
+          isDetecting = true;
+          detectFaces(image).then((_) {
+            isDetecting = false;
+          });
+        }
+      });
+    }
+  }
+
+  Future<void> detectFaces(CameraImage image) async {
+    try {
+      final WriteBuffer allBytes = WriteBuffer();
+      for (Plane plane in image.planes) {
+        allBytes.putUint8List(plane.bytes);
+      }
+      final bytes = allBytes.done().buffer.asUint8List();
+
+      final inputImage = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation: InputImageRotation.rotation270deg,
+          format: InputImageFormat.nv21,
+          bytesPerRow: image.planes[0].bytesPerRow,
+        ),
+      );
+
+      final faces = await faceDetector.processImage(inputImage);
+
+      if (!mounted) return;
+      if (faces.isNotEmpty) {
+        final face = faces.first;
+        setState(() {
+          smileProbability = face.smilingProbability;
+          leftEyeOpenProbability = face.leftEyeOpenProbability;
+          rightEyeOpenProbability = face.rightEyeOpenProbability;
+          headEulerAngleY = face.headEulerAngleY;
+        });
+        checkPoses(face);
+      }
+    } catch (e) {}
+  }
+
+  void checkPoses(Face face) async {
+    if (waitingForNeutral) {
+      if (isNeutralPosition(face)) {
+        setState(() {
+          waitingForNeutral = false;
+        });
+      }
+      return;
+    }
+
+    String currentAction = challengeAction[currentActionIndex];
+    bool actionCompleted = false;
+
+    switch (currentAction) {
+      case 'smile':
+        actionCompleted =
+            face.smilingProbability != null && face.smilingProbability! > 0.5;
+        break;
+
+      case 'blink':
+        actionCompleted =
+            (face.leftEyeOpenProbability != null &&
+                face.leftEyeOpenProbability! < 0.2) &&
+            (face.rightEyeOpenProbability != null &&
+                face.rightEyeOpenProbability! < 0.2);
+        break;
+
+      case 'lookRight':
+        actionCompleted =
+            face.headEulerAngleY != null && face.headEulerAngleY! < -20;
+        break;
+
+      case 'lookLeft':
+        actionCompleted =
+            face.headEulerAngleY != null && face.headEulerAngleY! > 20;
+        break;
+    }
+
+    if (actionCompleted) {
+      // If action is done, move to next step
+      setState(() {
+        currentActionIndex++;
+      });
+
+      if (currentActionIndex >= challengeAction.length) {
+        if (cameraController.value.isStreamingImages) {
+          await cameraController.stopImageStream();
+        }
+        if (mounted) {
+          Navigator.pop(context, true);
+        }
+        return;
+      }
+
+      setState(() {
+        waitingForNeutral = true;
+      });
+    }
+  }
+
+  bool isNeutralPosition(Face face) {
+    return ((face.smilingProbability == null ||
+            face.smilingProbability! < 0.1) &&
+        (face.leftEyeOpenProbability == null ||
+            face.leftEyeOpenProbability! > 0.7) &&
+        (face.rightEyeOpenProbability == null ||
+            face.rightEyeOpenProbability! > 0.7) &&
+        (face.headEulerAngleY! > -10 && face.headEulerAngleY! < 10));
+  }
+
+  @override
+  void dispose() {
+    if (cameraController != null && cameraController.value.isInitialized) {
+      if (cameraController.value.isStreamingImages) {
+        cameraController.stopImageStream();
+      }
+      cameraController.dispose();
+    }
+    faceDetector.close();
+    super.dispose();
+  }
+
+  String getActionDesc(String action) {
+    switch (action) {
+      case 'smile':
+        return 'smile';
+      case 'blink':
+        return 'blink';
+      case 'lookRight':
+        return 'lookRight';
+      case 'lookLeft':
+        return 'lookLeft';
+      default:
+        return '';
+    }
+  }
+
+  Widget build(BuildContext context) {
+    if (currentActionIndex >= challengeAction.length) {
+      return Center(child: CircularProgressIndicator());
+    }
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.redAccent,
+        toolbarHeight: 70,
+        centerTitle: true,
+        title: Text("Verify Your Identity"),
+      ),
+      body: isCameraInittialized
+          ? Stack(
+              children: [
+                Positioned.fill(child: CameraPreview(cameraController)),
+                CustomPaint(painter: HeadMaskPointers(), child: Container()),
+                Positioned(
+                  top: 16,
+                  left: 16,
+                  right: 16,
+                  child: Container(
+                    padding: EdgeInsets.all(8),
+                    color: Colors.black54,
+                    child: Column(
+                      children: [
+                        Text(
+                          'Please ${getActionDesc(challengeAction[currentActionIndex])}',
+                          style: TextStyle(color: Colors.white, fontSize: 18),
+                          textAlign: TextAlign.center,
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'Step ${currentActionIndex + 1} of ${challengeAction.length}',
+                          style: TextStyle(color: Colors.white, fontSize: 16),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 16,
+                  left: 16,
+                  child: Container(
+                    padding: EdgeInsets.all(8),
+                    color: Colors.black54,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Smile: ${smileProbability != null ? (smileProbability! * 100).toStringAsFixed(2) : 'N/A'}%',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        Text(
+                          'Blink: ${leftEyeOpenProbability != null && rightEyeOpenProbability != null ? (((leftEyeOpenProbability! + rightEyeOpenProbability!) / 2) * 100).toStringAsFixed(2) : 'N/A'}%',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        Text(
+                          'Look: ${headEulerAngleY != null ? headEulerAngleY!.toStringAsFixed(2) : 'N/A'}°',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : Center(child: CircularProgressIndicator()),
+    );
+  }
+}
+
+class HeadMaskPointers extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black45
+      ..style = PaintingStyle.fill;
+
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width * 0.48;
+    final path = Path()
+      ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..addOval(Rect.fromCircle(center: center, radius: radius))
+      ..fillType = PathFillType.evenOdd;
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) {
+    return false;
+  }
+}

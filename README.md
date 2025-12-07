@@ -14,3 +14,7 @@ Flutter & Dart
 Google ML Kit Face Detection
 Camera plugin for real-time streaming
 CustomPainter for overlay UI
+
+Dependencies Needed
+  camera: latest
+  google_mlkit_face_detection: latest
